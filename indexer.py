@@ -8,7 +8,11 @@ def index(pretty=True, cache=False):
         try:
             with open("./data/positional_index.json", "r") as f:
                 pos_index = json.load(f)
-            return pos_index
+            with open("./data/doc_length.json", "r") as f:
+                length = json.load(f)
+            with open("./data/champion_list.json", "r") as f:
+                champion_list = json.load(f)
+            return pos_index, length, champion_list
         except:
             pass
 
@@ -36,7 +40,8 @@ def index(pretty=True, cache=False):
 
     print("Stemming..")
     # --- Stemming ---
-    all_tokens = stem(all_tokens)
+    all_tokens = stem(all_tokens, stopwords)
+
     word_counts = count_common_words(all_tokens)
     with open("./data/word_count_stemmed.json", "w") as f:
         json.dump(word_counts, f, ensure_ascii=False, indent=indentation)
@@ -50,90 +55,17 @@ def index(pretty=True, cache=False):
         json.dump(pos_index, f, ensure_ascii=False, indent=indentation)
     print("Indexing done.")
 
-    return pos_index
+    # Create champion list
+    champion_list = create_champion_list(pos_index)
+    with open("./data/champion_list.json", "w") as f:
+        json.dump(champion_list, f, ensure_ascii=False, indent=indentation)
 
+    # Calculate length of each document
+    length = calculate_doc_length(all_tokens, pos_index)
+    with open("./data/doc_length.json", "w") as f:
+        json.dump(length, f, ensure_ascii=False, indent=indentation)
 
-# Stemming
-def stem(tokens):
-    ps = PersianStemmer()
-    stemmed_tokens = []
-    i = 0
-    for t in tokens:
-        i += 1
-        stemmed_tokens.append((ps.run(t[0]), t[1], t[2]))
-        if i % 1000000 == 0:
-            print(i, "/", len(tokens), " tokens stemmed")
-    return stemmed_tokens
-
-
-# TODO: Indexing
-def positional_indexing(tokens, num_docs):
-    # sort tokens
-    tokens.sort()
-    print("Tokens sorted")
-    # create positional index
-    positional_index = {}
-    i = 0
-    lt = ""
-    while i < len(tokens):
-        t = tokens[i][0]
-        if t == "":
-            i += 1
-            continue
-        doc = tokens[i][1]
-        pos = tokens[i][2]
-        if t == lt:
-            # Update frequency
-            freq = positional_index[t][0]
-            freq += 1
-            positional_index[t][0] = freq
-
-            # Update postings
-            postings = positional_index[t][2]
-            if doc in postings:
-                docFreq = postings[doc][0]
-                docFreq += 1
-                postings[doc][0] = docFreq
-
-                positions = postings[doc][2]
-                positions.append(pos)
-                postings[doc][2] = positions
-
-            else:
-                postings[doc] = [1, 0, [pos]]
-        else:
-            # (freq, idf, {doc: (docFreq, tf, [pos])})
-            positional_index[t] = [1, 0, {doc: [1, 0, [pos]]}]
-            # update idf for previous token
-            if lt != "":
-                positional_index[lt][1] = round(
-                    math.log(num_docs / positional_index[lt][0], LOG_BASE), 4
-                )
-
-                # Update tf for previous tokens documents
-                postings = positional_index[lt][2]
-                for d in postings.keys():
-                    docFreq = postings[d][0]
-                    tf = round(1 + math.log(docFreq, LOG_BASE), 4)
-                    postings[d][1] = tf
-                positional_index[lt][2] = postings
-        lt = t
-        i += 1
-        if i % 100000 == 0:
-            print(i, "/", len(tokens), " tokens indexed")
-    # update tf-idf for last token
-    if lt != "":
-        positional_index[lt][1] = round(
-            math.log(num_docs / positional_index[lt][0], LOG_BASE), 4
-        )
-        postings = positional_index[lt][2]
-        for d in postings.keys():
-            docFreq = postings[d][0]
-            tf = round(1 + math.log(docFreq, LOG_BASE), 4)
-            postings[d][1] = tf
-        positional_index[lt][2] = postings
-
-    return positional_index
+    return pos_index, length, champion_list
 
 
 # TODO: Tokenizing
@@ -172,6 +104,7 @@ def tokenize(content):
 def normalize(tokens, docId, stopwords=[]):
     normalized_tokens = []
     check_verb = False
+    check_email = False
     last_token = ""
     i = 0
     for t in tokens:
@@ -182,9 +115,19 @@ def normalize(tokens, docId, stopwords=[]):
             check_verb = True
             last_token = t
             continue
+
+        if "@" in t:
+            check_email = True
+            last_token = t
+            continue
+
         if check_verb:
             new_t = last_token + "\u200c" + t
             check_verb = False
+
+        if check_email:
+            new_t = last_token + "." + t
+            check_email = False
 
         # postfix spacings
         if t in postfix and last_token != "":
@@ -226,6 +169,7 @@ def normalize(tokens, docId, stopwords=[]):
         new_t = new_t.replace("روبات", "ربات")
         new_t = new_t.replace("هيئت", "هیات")
         new_t = new_t.replace("آیینه", "آینه")
+        new_t = new_t.replace("ترکتور", "تراکتور")
 
         # replace english numbers to persian numbers
         new_t = new_t.replace("0", "۰")
@@ -282,3 +226,125 @@ def get_stopwords(from_cache=True, pretty=False):
         print("Error saving stopwords")
 
     return top50
+
+
+# Stemming
+def stem(tokens, stopwords=[]):
+    ps = PersianStemmer()
+    ps.enableVerb = True
+    stemmed_tokens = []
+    i = 0
+    for t in tokens:
+        i += 1
+        stemmed_t = ps.run(t[0])
+        if stemmed_t in stopwords:
+            continue
+        stemmed_tokens.append((stemmed_t, t[1], t[2]))
+        if i % 1000000 == 0:
+            print(i, "/", len(tokens), " tokens stemmed")
+    return stemmed_tokens
+
+
+# TODO: Indexing
+def positional_indexing(tokens, num_docs):
+    # sort tokens
+    tokens.sort()
+    print("Tokens sorted")
+    # create positional index
+    positional_index = {}
+    i = 0
+    lt = ""
+    while i < len(tokens):
+        t = tokens[i][0]
+        if t == "":
+            i += 1
+            continue
+        doc = tokens[i][1]
+        pos = tokens[i][2]
+        if t == lt:
+
+            # Update postings
+            postings = positional_index[t][2]
+            if doc in postings:
+                docFreq = postings[doc][0]
+                docFreq += 1
+                postings[doc][0] = docFreq
+
+                positions = postings[doc][2]
+                positions.append(pos)
+                postings[doc][2] = positions
+
+            else:
+                # Update frequency
+                freq = positional_index[t][0]
+                freq += 1
+                positional_index[t][0] = freq
+                postings[doc] = [1, 0, [pos]]
+        else:
+            # {term : freq, idf, {doc: (docFreq, tf, [pos])}}
+            positional_index[t] = [1, 0, {doc: [1, 0, [pos]]}]
+            # update idf for previous token
+            if lt != "":
+                positional_index[lt][1] = round(
+                    math.log(num_docs / positional_index[lt][0], LOG_BASE), 4
+                )
+
+                # Update tf for previous tokens documents
+                postings = positional_index[lt][2]
+                for d in postings.keys():
+                    docFreq = postings[d][0]
+                    tf = round(1 + math.log(docFreq, LOG_BASE), 4)
+                    postings[d][1] = tf
+                positional_index[lt][2] = postings
+        lt = t
+        i += 1
+        if i % 100000 == 0:
+            print(i, "/", len(tokens), " tokens indexed")
+    # update tf-idf for last token
+    if lt != "":
+        positional_index[lt][1] = round(
+            math.log(num_docs / positional_index[lt][0], LOG_BASE), 4
+        )
+        postings = positional_index[lt][2]
+        for d in postings.keys():
+            docFreq = postings[d][0]
+            tf = round(1 + math.log(docFreq, LOG_BASE), 4)
+            postings[d][1] = tf
+        positional_index[lt][2] = postings
+
+    return positional_index
+
+def create_champion_list(pos_index, CHAMPION_LIST_SIZE=50):
+    champion_list = {}
+    for term in pos_index.keys():
+        postings = pos_index[term][2]
+        champion_list[term] = [pos_index[term][0], pos_index[term][1], {}]
+        for d, v in postings.items():
+            champion_list[term][2][d] = v
+        champion_list[term][2] = dict(sorted(champion_list[term][2].items(), key=lambda x: x[1][1], reverse=True))
+        champion_list[term][2] = dict(list(champion_list[term][2].items())[:CHAMPION_LIST_SIZE])
+    return champion_list
+
+def calculate_doc_length(tokens, pos_index):
+    # sort based on docId
+    tokens.sort(key=lambda x: x[1])
+
+    length = {}
+    for term in tokens:
+        if term[1] not in length:
+            length[term[1]] = 0
+        t = term[0]
+        doc = term[1]
+        if t in pos_index:
+            idf = pos_index[t][1]
+            postings = pos_index[t][2]
+            tf = 0
+            tf = postings[doc][1]
+
+            w_d = tf * idf
+            length[doc] += w_d * w_d
+
+    for doc in length.keys():
+        length[doc] = math.sqrt(length[doc])
+
+    return length
