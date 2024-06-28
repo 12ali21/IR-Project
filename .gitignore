@@ -1,0 +1,5 @@
+data/
+pack/
+*.zip
+test*
+__pycache__/
